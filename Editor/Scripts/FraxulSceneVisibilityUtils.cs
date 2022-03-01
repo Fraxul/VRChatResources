@@ -65,14 +65,17 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
       }
     }
   }
-
-  [MenuItem("Tools/Fraxul/Scene Visibility/Reset", priority = 100)]
-  static void SceneVisibilityReset() {
+  static void Reset() {
     SceneVisibilityManager.instance.ShowAll();
+
+    // Cleanup collision proxies, if they exist
+    GameObject colliderProxyRoot = GameObject.Find(proxyContainerName);
+    if (colliderProxyRoot != null) {
+      UnityEngine.Object.DestroyImmediate(colliderProxyRoot);
+    }
   }
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/Invert", priority = 101)]
-  static void SceneVisibilityInvert() {
+  static void Invert() {
     var scene = EditorSceneManager.GetActiveScene();
     var rootGameObjects = scene.GetRootGameObjects();
     foreach (var go in rootGameObjects) {
@@ -81,57 +84,139 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
   }
 
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/Only Selected", priority = 102)]
-  static void SceneVisibilityOnlySelected() {
-    SceneVisibilityManager.instance.HideAll();
+  static void AdjustSelection(bool hide, bool includeDescendants) {
     var selectedTransforms = Selection.GetTransforms(SelectionMode.Unfiltered);
     foreach (Transform xf in selectedTransforms) {
-      SceneVisibilityManager.instance.Show(xf.gameObject, /*includeDescendants=*/ false);
+      if (hide) {
+        SceneVisibilityManager.instance.Hide(xf.gameObject, includeDescendants);
+      } else {
+        SceneVisibilityManager.instance.Show(xf.gameObject, includeDescendants);
+      }
     }
+
+  }
+  static GameObject generateProxyLocator(Transform proxyContainerXf, GameObject refGO) {
+    var res = new GameObject(refGO.name + "_proxyLocator");
+    res.tag = "EditorOnly";
+    res.hideFlags = HideFlags.DontSaveInBuild | HideFlags.DontSaveInEditor;
+    res.transform.SetParent(proxyContainerXf);
+    res.transform.SetPositionAndRotation(refGO.transform.position, refGO.transform.rotation);
+    res.transform.localScale = refGO.transform.lossyScale;
+    return res;
   }
 
-    [MenuItem("Tools/Fraxul/Scene Visibility/Only Selected + Descendants", priority = 103)]
-  static void SceneVisibilityOnlySelectedWithDescendants() {
-    SceneVisibilityManager.instance.HideAll();
-    var selectedTransforms = Selection.GetTransforms(SelectionMode.Deep);
-    foreach (Transform xf in selectedTransforms) {
-      SceneVisibilityManager.instance.Show(xf.gameObject, /*includeDescendants=*/ true);
+
+  static void setupProxy(Transform proxyLocatorXf, GameObject proxy) {
+    proxy.tag = "EditorOnly";
+    proxy.hideFlags = HideFlags.DontSaveInBuild | HideFlags.DontSaveInEditor;
+    proxy.transform.SetParent(proxyLocatorXf);
+    proxy.transform.localPosition = Vector3.zero;
+    proxy.transform.localRotation = Quaternion.identity;
+    proxy.transform.localScale = Vector3.one;
+  }
+
+  const string proxyContainerName = "_FraxulSceneVisibilityColliderProxies";
+  static void VisualizeCollision() {
+    // Delete old collision proxies, if they exist
+    GameObject colliderProxyRoot = GameObject.Find(proxyContainerName);
+    if (colliderProxyRoot != null) {
+      UnityEngine.Object.DestroyImmediate(colliderProxyRoot);
     }
-  }
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/Hide Selected", priority = 104)]
-  static void SceneVisibilityHideSelected() {
-    var selectedTransforms = Selection.GetTransforms(SelectionMode.Unfiltered);
-    foreach (Transform xf in selectedTransforms) {
-      SceneVisibilityManager.instance.Hide(xf.gameObject, /*includeDescendants=*/ false);
-    }
-  }
-  [MenuItem("Tools/Fraxul/Scene Visibility/Hide Selected + Descendants", priority = 105)]
-  static void SceneVisibilityHideSelectedWithDescendants() {
-    var selectedTransforms = Selection.GetTransforms(SelectionMode.Deep);
-    foreach (Transform xf in selectedTransforms) {
-      SceneVisibilityManager.instance.Hide(xf.gameObject, /*includeDescendants=*/ true);
-    }
-  }
+    // Create a container for collision proxies.
+    // The whole hierarchy is marked editor-only and "don't save", so they won't make it into builds or clutter up the scene file.
+    colliderProxyRoot = new GameObject(proxyContainerName);
+    colliderProxyRoot.hideFlags = HideFlags.DontSaveInBuild | HideFlags.DontSaveInEditor; // | HideFlags.HideInHierarchy;
+    colliderProxyRoot.tag = "EditorOnly";
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/No Static Occlusion", priority = 120)]
-  static void SceneVisibilityNoStaticOcclusion() {
-    ApplyVisibility( (GameObject go) => !(GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccludeeStatic) || GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccluderStatic) || go.CompareTag("EditorOnly")) );
-  }
+    // Get a handle to the "Cube" default resource mesh; we use this for our "fast path" for visualizing BoxColliders on Cube meshes.
+    var cubeGO = GameObject.CreatePrimitive(PrimitiveType.Cube);
+    Mesh cubeSharedMesh = cubeGO.GetComponent<MeshFilter>().sharedMesh;
+    Material defaultSharedMaterial = cubeGO.GetComponent<MeshRenderer>().sharedMaterial;
+    UnityEngine.Object.DestroyImmediate(cubeGO);
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/Occluder Static", priority = 121)]
-  static void SceneVisibilityOccluderStatic() {
-    ApplyVisibility( (GameObject go) => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccluderStatic) && !go.CompareTag("EditorOnly") );
-  }
+    ApplyVisibility( (GameObject go) => {
+      if (go.CompareTag("EditorOnly"))
+        return false;
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/Occludee Static", priority = 122)]
-  static void SceneVisibilityOccludeeStatic() {
-    ApplyVisibility( (GameObject go) => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccludeeStatic) && !go.CompareTag("EditorOnly") );
-  }
+      if (!go.activeInHierarchy)
+        return false; // inactive objects have no collision
+
+      Collider[] colliders = go.GetComponents<Collider>();
+      if (colliders.Length == 0)
+        return false;
 
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/GPU Instancing-Static Batching conflicts", priority = 140)]
-  static void SceneVisibilityGPUInstancingConflict() {
+      MeshFilter mf = null;
+      MeshRenderer mr = null;
+      go.TryGetComponent<MeshFilter>(out mf);
+      go.TryGetComponent<MeshRenderer>(out mr);
+
+      foreach (Collider c in colliders) {
+        if ((!c.enabled)|| c.isTrigger) 
+          continue; // only enabled, non-trigger colliders
+        if (c.GetType() == typeof(MeshCollider)) {
+          MeshCollider mc = (MeshCollider) c;
+          if (mr != null && mf != null && mf.sharedMesh == mc.sharedMesh && mr.enabled) {
+            // Fast path: mesh renderer enabled and mesh filter matches MeshCollider mesh
+            return true;
+          }
+          // Generate a proxy using the collision mesh and the default material
+          var proxyLocation = generateProxyLocator(colliderProxyRoot.transform, go);
+          var proxy = new GameObject("MeshColliderProxy", typeof(MeshFilter), typeof(MeshRenderer));
+          setupProxy(proxyLocation.transform, proxy);
+          MeshFilter proxyMf = proxy.GetComponent<MeshFilter>();
+          MeshRenderer proxyMr = proxy.GetComponent<MeshRenderer>();
+          proxyMf.sharedMesh = mc.sharedMesh;
+          proxyMr.material = defaultSharedMaterial;
+          
+        } else if (c.GetType() == typeof(BoxCollider)) {
+          BoxCollider bc = (BoxCollider) c;
+          if (mf != null && mr != null && mr.enabled && mf.sharedMesh == cubeSharedMesh && bc.center == Vector3.zero && bc.size == Vector3.one) {
+            // fast-path
+            return true;
+          } else {
+            var proxyLocation = generateProxyLocator(colliderProxyRoot.transform, go);
+            var proxy = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            setupProxy(proxyLocation.transform, proxy);
+
+            proxy.transform.localPosition = bc.center;
+            proxy.transform.localScale = bc.size;
+          }
+        } else if (c.GetType() == typeof(CapsuleCollider)) {
+          CapsuleCollider cc = (CapsuleCollider) c;
+          var proxyLocation = generateProxyLocator(colliderProxyRoot.transform, go);
+          var proxy = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+          setupProxy(proxyLocation.transform, proxy);
+
+          proxy.transform.localPosition = cc.center;
+          proxy.transform.localScale = new Vector3(cc.radius * 2.0f, cc.height * 0.5f, cc.radius * 2.0f);
+          switch (cc.direction) {
+            case 0: // X-axis
+              proxy.transform.localEulerAngles = new Vector3(0, 0, 90);
+              break;
+            case 1: // Y-axis
+              proxy.transform.localEulerAngles = Vector3.zero;
+              break;
+            case 2: // Z-axis
+              proxy.transform.localEulerAngles = new Vector3(90, 0, 0);
+              break;
+          }
+
+        } else {
+          Debug.LogWarning(string.Format("GameObject {0}: Unhandled collider type {1}, can't generate proxy", go.name, c.GetType().ToString()));
+          // just make the object visible anyway
+          return true;
+        }
+      }
+      return false;
+    });
+
+    SceneVisibilityManager.instance.Show(colliderProxyRoot, /*includeDescendants=*/ true);
+  }
+
+
+  static void ShowGPUInstancingConflicts() {
     List<GameObject> objs = SelectObjects((GameObject go) => {
       if (!GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.BatchingStatic))
         return false; // only GameObjects that are batching-static
@@ -168,8 +253,7 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
 
   }
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/GPU Instancing Opportunities", priority = 141)]
-  static void SceneVisibilityGPUInstancingOpportunity() {
+  static void ShowGPUInstancingOpportunities() {
     List<GameObject> objs = SelectObjects((GameObject go) => {
       MeshRenderer mr = go.GetComponent<MeshRenderer>();
       if ((mr == null) || (!mr.enabled)) return false; // require mesh renderer to exist and be enabled
@@ -218,25 +302,75 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
 
 
 
-  [MenuItem("Tools/Fraxul/Scene Visibility/Show Tool Window", priority = 1000)]
+  [MenuItem("Tools/Fraxul/Scene Visibility Tool...", priority = 10)]
   public static void ShowWindow() {
     EditorWindow.GetWindow(typeof(FraxulSceneVisibilityUtils), /*utilityWindow=*/true, "Scene Visibility");
   }
 
   void OnGUI() {
-    if (GUILayout.Button("Reset")) SceneVisibilityReset();
-    if (GUILayout.Button("Invert")) SceneVisibilityInvert();
+    Rect contentRect = EditorGUILayout.BeginVertical();
+
+    if (GUILayout.Button("Reset")) Reset();
+    if (GUILayout.Button("Invert")) Invert();
+    if (GUILayout.Button("Hide EditorOnly")) {
+      foreach (GameObject go in GameObject.FindGameObjectsWithTag("EditorOnly")) SceneVisibilityManager.instance.Hide(go, /*includeDescendants=*/ true);
+    }
+
     EditorGUILayout.Space();
-    if (GUILayout.Button("Only Selected")) SceneVisibilityOnlySelected();
-    if (GUILayout.Button("Only Selected + Descendants")) SceneVisibilityOnlySelectedWithDescendants();
-    if (GUILayout.Button("Hide Selected")) SceneVisibilityHideSelected();
-    if (GUILayout.Button("Hide Selected + Descendants")) SceneVisibilityHideSelectedWithDescendants();
+
+    if (GUILayout.Button("Only Selected")) {
+      SceneVisibilityManager.instance.HideAll();
+      AdjustSelection(/*hide=*/ false, /*includeDescendants=*/ false);
+    }
+    if (GUILayout.Button("Only Selected + Descendants")) {
+      SceneVisibilityManager.instance.HideAll();
+      AdjustSelection(/*hide=*/ false, /*includeDescendants=*/ true);
+    }
+    if (GUILayout.Button("Hide Selected")) AdjustSelection(/*hide=*/ true, /*includeDescendants=*/ false);
+    if (GUILayout.Button("Hide Selected + Descendants")) AdjustSelection(/*hide=*/ true, /*includeDescendants=*/ true);
+
     EditorGUILayout.Space();
-    if (GUILayout.Button("No Static Occlusion")) SceneVisibilityNoStaticOcclusion();
-    if (GUILayout.Button("Occluder Static")) SceneVisibilityOccluderStatic();
-    if (GUILayout.Button("Occludee Static")) SceneVisibilityOccludeeStatic();
+
+    if (GUILayout.Button("No Static Occlusion")) {
+      ApplyVisibility( (GameObject go) => !(GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccludeeStatic) || GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccluderStatic) || go.CompareTag("EditorOnly")) );
+    }
+    EditorGUILayout.BeginHorizontal();
+      if (GUILayout.Button("Occluder Static")) {
+        // We don't filter out EditorOnly occluder-static objects during visualization, since adding EditorOnly occlusion "helper objects" is a common strategy.
+        ApplyVisibility( (GameObject go) => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccluderStatic) );
+      }
+      if (GUILayout.Button("Not Occluder Static")) {
+        // We do filter out EditorOnly when filtering for non-Occluder Static, though, since large non-Occluder EditorOnly objects are common for light baking and such
+        ApplyVisibility( (GameObject go) => (!GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccluderStatic)) && !go.CompareTag("EditorOnly") );
+      }
+    EditorGUILayout.EndHorizontal();
+    EditorGUILayout.BeginHorizontal();
+      if (GUILayout.Button("Occludee Static")) {
+        ApplyVisibility( (GameObject go) => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccludeeStatic) && !go.CompareTag("EditorOnly") );
+      }
+      if (GUILayout.Button("Not Occludee Static")) {
+        ApplyVisibility( (GameObject go) => (!GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccludeeStatic)) && !go.CompareTag("EditorOnly") );
+      }
+    EditorGUILayout.EndHorizontal();
+
     EditorGUILayout.Space();
-    if (GUILayout.Button("GPU Instancing-Static Batching conflicts")) SceneVisibilityGPUInstancingConflict();
-    if (GUILayout.Button("GPU Instancing Opportunities")) SceneVisibilityGPUInstancingOpportunity();
+
+    if (GUILayout.Button("Visualize Collision")) VisualizeCollision();
+
+    EditorGUILayout.Space();
+
+    if (GUILayout.Button("GPU Instancing-Static Batching conflicts")) ShowGPUInstancingConflicts();
+    if (GUILayout.Button("GPU Instancing Opportunities")) ShowGPUInstancingOpportunities();
+    if (GUILayout.Button("Odd Negative Scaling")) {
+      ApplyVisibility( (GameObject go) => (go.transform.lossyScale.x < 0.0f || go.transform.lossyScale.y < 0.0f || go.transform.lossyScale.z < 0.0f) );
+    }
+
+    
+    EditorGUILayout.EndVertical(); // contentRect
+
+    // Compute minimum size to show all controls
+    int minContentHeightPadded = ((int) contentRect.height) + GUI.skin.button.padding.top + GUI.skin.button.padding.bottom;
+    if (((int) this.minSize.y) != minContentHeightPadded)
+      this.minSize = new Vector2(200, minContentHeightPadded);
   }
 }
