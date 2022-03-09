@@ -12,6 +12,26 @@ class FraxulPrefabUtils : MonoBehaviour {
     PrefabUtility.RevertPropertyOverride(prop, InteractionMode.AutomatedAction);
   }
 
+  [MenuItem("Tools/Fraxul/Recursive Revert Transforms")]
+  static void RevertTransforms() {
+    var selectedTransforms = Selection.GetTransforms(SelectionMode.Deep | SelectionMode.Editable);
+    foreach (Transform xf in selectedTransforms) {
+      if (!PrefabUtility.IsPartOfPrefabInstance(xf)) {
+        Debug.Log(string.Format("{0}: not part of a prefab instance", xf.gameObject.name));
+        continue;
+      }
+      Undo.RecordObject(xf, "Revert Transforms");
+
+      var so = new SerializedObject(xf);
+      RevertProperty(so, "m_LocalPosition");
+      RevertProperty(so, "m_LocalRotation");
+      RevertProperty(so, "m_LocalScale");
+      if (so.ApplyModifiedProperties())
+        PrefabUtility.RecordPrefabInstancePropertyModifications(xf);
+    }
+  }
+
+
   [MenuItem("Tools/Fraxul/Recursive Revert Static Flags")]
   static void RevertStaticFlags() {
     var selectedTransforms = Selection.GetTransforms(SelectionMode.Deep | SelectionMode.Editable);

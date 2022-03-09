@@ -4,8 +4,19 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEditor.Experimental.SceneManagement;
 
 public class FraxulSceneVisibilityUtils : EditorWindow {
+
+  static UnityEngine.SceneManagement.Scene ActiveEditorScene() {
+    // Select the Prefab stage if we're currently editing a prefab;
+    // otherwise, return the active scene.
+    var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
+    if (prefabStage != null) {
+      return prefabStage.scene;
+    }
+    return EditorSceneManager.GetActiveScene();
+  }
 
   static void RecursiveSelectObjects(ref List<GameObject> objs, GameObject go, Func<GameObject, bool> filterFn, bool skipEditorOnly) {
     if (skipEditorOnly && go.CompareTag("EditorOnly")) {
@@ -21,8 +32,7 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
 
   static List<GameObject> SelectObjects(Func<GameObject, bool> filterFn, bool skipEditorOnly = true) {
     List<GameObject> res = new List<GameObject>();
-    var scene = EditorSceneManager.GetActiveScene();
-    var rootGameObjects = scene.GetRootGameObjects();
+    var rootGameObjects = ActiveEditorScene().GetRootGameObjects();
     foreach (var go in rootGameObjects) {
       RecursiveSelectObjects(ref res, go, filterFn, skipEditorOnly);
     }
@@ -43,8 +53,7 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
   }
 
   static void ApplyVisibility(Func<GameObject, bool> testFn) {
-    var scene = EditorSceneManager.GetActiveScene();
-    var rootGameObjects = scene.GetRootGameObjects();
+    var rootGameObjects = ActiveEditorScene().GetRootGameObjects();
     foreach (var go in rootGameObjects) {
       RecursiveApplyVisibility(go, testFn);
     }
@@ -65,7 +74,7 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
       }
     }
   }
-  static void Reset() {
+  static void ResetVisibility() {
     SceneVisibilityManager.instance.ShowAll();
 
     // Cleanup collision proxies, if they exist
@@ -75,9 +84,8 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
     }
   }
 
-  static void Invert() {
-    var scene = EditorSceneManager.GetActiveScene();
-    var rootGameObjects = scene.GetRootGameObjects();
+  static void InvertVisibility() {
+    var rootGameObjects = ActiveEditorScene().GetRootGameObjects();
     foreach (var go in rootGameObjects) {
       RecursiveInvertVisibility(go);
     }
@@ -301,22 +309,47 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
   }
 
 
+  static bool FilterGetLightmapScale(GameObject go, out float lightmapScale) {
+    lightmapScale = 0.0f;
+    if (!GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ContributeGI))
+        return false;
+    MeshRenderer mr = go.GetComponent<MeshRenderer>();
+    if (mr == null)
+      return false;
+
+    if (mr.receiveGI == ReceiveGI.Lightmaps) {
+      lightmapScale = mr.scaleInLightmap;
+      return true;
+    }
+    return false;
+  }
+
+
 
   [MenuItem("Tools/Fraxul/Scene Visibility Tool...", priority = 10)]
   public static void ShowWindow() {
     EditorWindow.GetWindow(typeof(FraxulSceneVisibilityUtils), /*utilityWindow=*/true, "Scene Visibility");
   }
 
+
+  // GUI state
+  float m_lightmapScaleThreshold = 1.0f;
+
+
   void OnGUI() {
     Rect contentRect = EditorGUILayout.BeginVertical();
 
-    if (GUILayout.Button("Reset")) Reset();
-    if (GUILayout.Button("Invert")) Invert();
+    // === Basic functionality ===
+
+    if (GUILayout.Button("Reset")) ResetVisibility();
+    if (GUILayout.Button("Invert")) InvertVisibility();
     if (GUILayout.Button("Hide EditorOnly")) {
       foreach (GameObject go in GameObject.FindGameObjectsWithTag("EditorOnly")) SceneVisibilityManager.instance.Hide(go, /*includeDescendants=*/ true);
     }
 
     EditorGUILayout.Space();
+
+    // === Selection-based ===
 
     if (GUILayout.Button("Only Selected")) {
       SceneVisibilityManager.instance.HideAll();
@@ -330,6 +363,8 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
     if (GUILayout.Button("Hide Selected + Descendants")) AdjustSelection(/*hide=*/ true, /*includeDescendants=*/ true);
 
     EditorGUILayout.Space();
+
+    // === Occlusion ===
 
     if (GUILayout.Button("No Static Occlusion")) {
       ApplyVisibility( (GameObject go) => !(GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccludeeStatic) || GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.OccluderStatic) || go.CompareTag("EditorOnly")) );
@@ -355,9 +390,76 @@ public class FraxulSceneVisibilityUtils : EditorWindow {
 
     EditorGUILayout.Space();
 
+    // === Global Illumination ===
+
+    EditorGUILayout.BeginHorizontal();
+      if (GUILayout.Button("Contribute GI")) {
+        ApplyVisibility( (GameObject go) => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ContributeGI) );
+      }
+      if (GUILayout.Button("No Contribute GI")) {
+        ApplyVisibility( (GameObject go) => !GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ContributeGI) );
+      }
+    EditorGUILayout.EndHorizontal();
+
+    EditorGUILayout.BeginHorizontal();
+      if (GUILayout.Button("GI Lightmapped")) {
+        ApplyVisibility( (GameObject go) => {
+          if (!GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ContributeGI)) return false;
+          MeshRenderer mr = go.GetComponent<MeshRenderer>();
+          if (mr == null) return false;
+          return (mr.receiveGI == ReceiveGI.Lightmaps && mr.scaleInLightmap > 0.0f);
+        });
+      }
+      if (GUILayout.Button("GI Not Lightmapped")) {
+        ApplyVisibility( (GameObject go) => {
+          if (!GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ContributeGI)) return false;
+          MeshRenderer mr = go.GetComponent<MeshRenderer>();
+          if (mr == null) return false;
+          return (mr.receiveGI == ReceiveGI.LightProbes || mr.scaleInLightmap <= 0.0f);
+        });
+      }
+    EditorGUILayout.EndHorizontal();
+
+    EditorGUILayout.BeginHorizontal();
+    GUILayout.Label("Lightmap Scale");
+    m_lightmapScaleThreshold = EditorGUILayout.Slider(m_lightmapScaleThreshold, 0.0f, 2.0f);
+    EditorGUILayout.EndHorizontal();
+
+    EditorGUILayout.BeginHorizontal();
+    if (GUILayout.Button("Less"))
+      ApplyVisibility( (GameObject go) => { float ls; if (!FilterGetLightmapScale(go, out ls)) return false; return ls < m_lightmapScaleThreshold; });
+    if (GUILayout.Button("LEq"))
+      ApplyVisibility( (GameObject go) => { float ls; if (!FilterGetLightmapScale(go, out ls)) return false; return ls <= m_lightmapScaleThreshold; });
+    if (GUILayout.Button("Eq"))
+      ApplyVisibility( (GameObject go) => { float ls; if (!FilterGetLightmapScale(go, out ls)) return false; return Math.Abs(ls - m_lightmapScaleThreshold) < Vector3.kEpsilon; });
+    if (GUILayout.Button("GEq"))
+      ApplyVisibility( (GameObject go) => { float ls; if (!FilterGetLightmapScale(go, out ls)) return false; return ls >= m_lightmapScaleThreshold; });
+    if (GUILayout.Button("Greater"))
+      ApplyVisibility( (GameObject go) => { float ls; if (!FilterGetLightmapScale(go, out ls)) return false; return ls > m_lightmapScaleThreshold; });
+    EditorGUILayout.EndHorizontal();
+
+    EditorGUILayout.Space();
+
+    // === Reflection Static ===
+
+    EditorGUILayout.BeginHorizontal();
+      if (GUILayout.Button("Reflection Static")) {
+        ApplyVisibility( (GameObject go) => GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ReflectionProbeStatic) );
+      }
+      if (GUILayout.Button("Not Reflection Static")) {
+        ApplyVisibility( (GameObject go) => !GameObjectUtility.AreStaticEditorFlagsSet(go, StaticEditorFlags.ReflectionProbeStatic) );
+      }
+    EditorGUILayout.EndHorizontal();
+
+    EditorGUILayout.Space();
+
+    // === Collision ===
+
     if (GUILayout.Button("Visualize Collision")) VisualizeCollision();
 
     EditorGUILayout.Space();
+
+    // === GPU Instancing tools ===
 
     if (GUILayout.Button("GPU Instancing-Static Batching conflicts")) ShowGPUInstancingConflicts();
     if (GUILayout.Button("GPU Instancing Opportunities")) ShowGPUInstancingOpportunities();

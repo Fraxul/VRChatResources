@@ -66,7 +66,6 @@ class FraxulMiscUtils {
     }
   }
 
-  [MenuItem("Tools/Fraxul/Absolute Value Scale")]
   static void AbsoluteValueScale(bool preserveChildPositions = false) {
     const string kUndoName = "Absolute Value Scale";
     var selection = Selection.GetTransforms(SelectionMode.TopLevel | SelectionMode.Editable);
@@ -107,6 +106,11 @@ class FraxulMiscUtils {
           Mathf.Abs(tr.localScale.z));
       }
     }
+  }
+
+  [MenuItem("Tools/Fraxul/Absolute Value Scale")]
+  static void AbsoluteValueScale_menu() {
+    AbsoluteValueScale(false);
   }
 
   [MenuItem("Tools/Fraxul/Absolute Value Scale + preserve child positions")]
